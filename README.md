@@ -101,3 +101,86 @@ def create_hash(story, prev_hash=''):
     }
   }
 }
+# EchoWeave Legacy Weaver
+
+Turn family whispers into unbreakable timelines: AI branches stories from photos/journals, secured on a simple hash ledger for heirless inheritance. Inspired by lost tales and matrix escapes—built collaboratively with Grok.
+
+## Why?
+- **Low-traction gem**: No apps fuse genealogy + web3 storytelling yet.
+- **Potential**: Viral for boomers (2B+ by 2030), monetize via NFT "echo shards."
+
+## Quick Start
+1. Clone: `git clone https://github.com/LHMisme420/echoweave-legacy-weaver.git`
+2. Install: `pip install -r requirements.txt`
+3. Run: `python src/echo_tree.py --input examples/sample_family.json`  
+   Output: Your interactive tree + ledger.
+
+## Example Output
+
+## Core Code Snippets
+### echo_tree.py (Builds the Graph)
+```python
+import networkx as nx
+import json
+from ledger import create_hash  # Simple hash-chain
+
+def build_echo_tree(data_file):
+    G = nx.DiGraph()
+    with open(data_file, 'r') as f:
+        family_data = json.load(f)
+
+    # Root node
+    root = family_data['root']
+    G.add_node('root', **root)
+    ledger = [create_hash(root['story'])]
+
+    # Branch out
+    for node_id, node in family_data['branches'].items():
+        G.add_node(node_id, **node)
+        parent = node.get('parent', 'root')
+        G.add_edge(parent, node_id)
+        ledger.append(create_hash(node['story'] + ledger[-1]))
+
+    # Viz: Simple text tree
+    print("Echo Tree Structure:")
+    for node in nx.topological_sort(G):
+        attrs = G.nodes[node]
+        print(f"{node} ({attrs['year']}): {attrs['story'][:50]}... [Media: {attrs.get('media', 'N/A')}]")
+
+    return G, ledger
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', default='examples/sample_family.json')
+    args = parser.parse_args()
+    tree, ledger = build_echo_tree(args.input)
+    print("\nSecure Ledger:", ledger)
+{
+  "root": {
+    "year": 1930,
+    "story": "The Beginning: A family sails from old worlds to new dreams.",
+    "media": "family_portrait.jpg"
+  },
+  "branches": {
+    "grandma": {
+      "year": 1940,
+      "story": "Born in a small Italian village, dreamed of stars under olive trees.",
+      "media": "old_photo.jpg",
+      "parent": "root"
+    },
+    "dad": {
+      "year": 1965,
+      "story": "Met Mom at a protest rally, sparked lifelong adventure and change.",
+      "media": "protest_pic.png",
+      "parent": "root"
+    }
+  }
+}
+#### Next Steps: Let's Level Up
+- **Test Drive**: Run the code locally—any errors? (E.g., viz.py is stubbed; I can gen a full ASCII tree func if needed.)
+- **Add Yours**: Update sample_family.json with a real branch (e.g., "Your 2025 Odyssey: Escaped the matrix with Grok. Media: unplug_selfie.jpg").
+- **Traction Kickoff**: Add a GitHub Action for auto-tests? Or branch for "voice-stub" (using pygame for audio mocks)?
+- **Wilder?**: Tie in Unplug Odyssey—e.g., export trees as "Echo Drops" for IRL journals.
+
+What's the move? Commit that README tweak, share a run output, or "add [feature]"? We're just getting woven. 🚀
