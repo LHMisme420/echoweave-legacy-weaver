@@ -520,3 +520,179 @@ print("Hash added to ledger!")
   3. Run tree: Submits proposals. Use `confirm_tx.py` & `execute_tx.py` for the rest.
 - **Flow**: Submit (auto) → Confirm (manual, other keys) → Execute → Hash on-chain.
 - **Test**: Use Ganache with multiple accounts; query ledger on Etherscan.
+networkx==3.3
+web3==6.15.1
+py-solc-x==1.2.2
+safe-eth-py  # Gnosis Safe SDK (v1.5+ as of 2025)
+eth-account==0.13.1  # For signing helpers
+import json
+import argparse
+from web3 import Web3
+from solcx import compile_standard, install_solc
+from eth_account import Account
+from gnosis.eth import EthereumClient
+from gnosis.safe import SafeFactory, Safe
+from gnosis.pyipfs import get_web3
+
+# Install Solidity
+install_solc("0.8.24")
+
+# Parse args
+parser = argparse.ArgumentParser(description="Deploy Gnosis Safe + HashLedger")
+parser.add_argument('--owners', nargs='+', required=True, help='Owner addresses (checksummed)')
+parser.add_argument('--threshold', type=int, default=2, help='Confirmations required')
+parser.add_argument('--private-key', type=str, required=True, help='Deployer private key (first owner)')
+parser.add_argument('--rpc-url', default='https://sepolia.infura.io/v3/YOUR_INFURA_KEY', help='Sepolia RPC')
+args = parser.parse_args()
+
+# Setup
+w3 = Web3(Web3.HTTPProvider(args.rpc_url))
+if not w3.is_connected():
+    raise Exception("RPC connection failed")
+ethereum_client = EthereumClient(args.rpc_url, w3=w3)  # Wraps web3
+account = Account.from_key(args.private_key)
+print(f"Deploying from: {account.address}")
+
+owners = [Web3.to_checksum_address(o) for o in args.owners]
+print(f"Owners: {owners}, Threshold: {args.threshold}")
+
+# Step 1: Create Gnosis Safe
+factory = SafeFactory(ethereum_client)
+# Generate salt_nonce for deterministic address (optional; use random for prod)
+salt_nonce = 12345  # Or random.randint(1, 2**256-1)
+safe = factory.from_owners(
+    owner_addresses=owners,
+    threshold=args.threshold,
+    salt_nonce=salt_nonce,
+    chain_id=11155111  # Sepolia
+)
+
+# Build setup tx (deploys SafeProxy)
+setup_tx = safe.setup(
+    payment_token=None,  # No payment for setup
+    payment=None,
+    payment_receiver=None
+)
+
+# Sign & execute setup (deployer as executor)
+setup_tx.sign(args.private_key)
+tx_hash = setup_tx.execute(args.private_key, ethereum_client)
+receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+safe_address = safe.address  # Now deployed
+print(f"Safe deployed at: {safe_address}")
+print(f"Setup Tx: {tx_hash.hex()}")
+
+# Verify Safe info
+safe_info = safe.retrieve_all_info()
+print(f"Safe Nonce: {safe_info.nonce}, Owners: {len(safe_info.owners)}")
+
+# Step 2: Deploy HashLedger owned by Safe
+with open("../contracts/HashLedger.sol", "r") as f:
+    source = f.read()
+compiled = compile_standard({
+    "language": "Solidity",
+    "sources": {"HashLedger.sol": {"content": source}},
+    "settings": {"outputSelection": {"*": {"*": ["abi", "metadata", "evm.bytecode"]}}}
+}, solc_version="0.8.24")
+
+contract_interface = compiled["contracts"]["HashLedger.sol"]["HashLedger"]
+abi = contract_interface["abi"]
+bytecode = contract_interface["evm"]["bytecode"]["object"]
+
+nonce = w3.eth.get_transaction_count(account.address)
+deploy_tx = w3.eth.contract(abi=abi, bytecode=bytecode).constructor(safe_address).build_transaction({
+    "chainId": 11155111,
+    "gas": 1000000,
+    "gasPrice": w3.eth.gas_price,
+    "nonce": nonce,
+})
+signed_deploy = Account.sign_transaction(deploy_tx, args.private_key)
+deploy_hash = w3.eth.send_raw_transaction(signed_deploy.rawTransaction)
+deploy_receipt = w3.eth.wait_for_transaction_receipt(deploy_hash)
+ledger_address = deploy_receipt.contractAddress
+print(f"HashLedger deployed at: {ledger_address} (owned by Safe)")
+print(f"Deploy Tx: {deploy_hash.hex()}")
+
+# Save config
+config = {
+    "safe": {"address": safe_address, "abi": safe_info.safe_contract_abi},  # From SDK
+    "hash_ledger": {"address": ledger_address, "abi": abi}
+}
+with open("../config/gnosis_safe_config.json", "w") as f:
+    json.dump(config, f, indent=2)
+print("Config saved to config/gnosis_safe_config.json")
+import json
+import os
+from web3 import Web3
+from eth_account import Account
+from gnosis.eth import EthereumClient
+from gnosis.safe import Safe
+
+# Load config
+try:
+    with open("../config/gnosis_safe_config.json", "r") as f:
+        config = json.load(f)
+    ethereum_client = EthereumClient("https://sepolia.infura.io/v3/YOUR_INFURA_KEY")
+    safe = Safe(config["safe"]["address"], ethereum_client)
+    ledger_contract = ethereum_client.w3.eth.contract(
+        address=config["hash_ledger"]["address"],
+        abi=config["hash_ledger"]["abi"]
+    )
+    CHAIN_MODE = "gnosis-safe"
+except:
+    print("⚠️ Using local stub—run deploy first!")
+    CHAIN_MODE = "stub"
+
+def create_and_store_hash(story, prev_hash='', owner_keys=None):
+    full_input = story + prev_hash
+    story_hash = Web3.keccak(text=full_input).hex()
+
+    if CHAIN_MODE == "gnosis-safe" and owner_keys:
+        # Build multisig tx: Call ledger.addHash(story_hash)
+        data = ledger_contract.encodeABI(fn_name='addHash', args=[story_hash])
+        safe_tx = safe.build_multisig_tx(
+            to=ledger_contract.address,
+            value=0,
+            data=data,
+            operation=0,  # Call
+            safe_tx_gas=0,  # Auto-estimate
+            base_gas=0,
+            gas_price=None,  # Auto
+            gas_token="0x0000000000000000000000000000000000000000",
+            refund_receiver="0x0000000000000000000000000000000000000000",
+            signatures=None,
+            safe_nonce=None  # Auto
+        )
+
+        # Sign with all owners (for demo; threshold check in prod)
+        for key in owner_keys:
+            safe_tx.sign(key)
+        print(f"✅ Signed with {len(owner_keys)} owners (threshold: {safe.retrieve_all_info().threshold})")
+
+        # Simulate
+        simulation = safe_tx.simulate(ethereum_client)
+        if not simulation.success:
+            raise Exception(f"Simulation failed: {simulation.gas_used}")
+
+        # Execute with first owner's key
+        executor_key = owner_keys[0]
+        tx_hash = safe_tx.execute(executor_key)
+        receipt = ethereum_client.w3.eth.wait_for_transaction_receipt(tx_hash)
+        print(f"✅ Hash {story_hash[:16]}... stored on-chain | Tx: {tx_hash.hex()}")
+        return story_hash, tx_hash.hex()
+    else:
+        return story_hash[:16], "local-fallback"
+# In function: Pass owner_keys from args
+node_hash, node_tx = create_and_store_hash(node['story'], prev_hash, owner_keys=owner_keys)
+
+# In ledger list: {'hash': node_hash, 'tx': node_tx}
+parser.add_argument('--owner-keys', nargs='+', help='List of owner private keys for signing')
+# Then: tree, ledger = build_echo_tree(args.input, owner_keys=args.owner_keys)
+### Gnosis Safe Integration (v0.4)
+- **Why?** Pro multi-sig: Audited, modular, async signing.
+- **Setup**:
+  1. `pip install safe-eth-py`
+  2. `python scripts/deploy_safe_and_ledger.py --owners 0x... 0x... --threshold 2 --private-key 0x...`
+  3. Run tree: `python src/echo_tree.py --owner-keys 0xKey1 0xKey2`
+- **Flow**: SDK builds/signs/executes addHash calls. View on Etherscan/Safe UI.
+- **Prod Tips**: Use Safe Transaction Service for relaying; add modules for auto-approvals.
