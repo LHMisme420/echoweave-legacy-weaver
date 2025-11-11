@@ -821,3 +821,172 @@ if args.auto_execute:
 - **Flow**: Propose (1 sig) → Share hash → Async signs → Poll → Execute.
 - **Demo**: Proposes 3 txns (root + branches), waits ~5 mins for sigs, executes all.
 - **Prod**: Integrate webhooks for real-time (Safe API supports).
+echoweave-legacy-weaver/
+├── safe-app/                  # New: React Safe App
+│   ├── public/
+│   │   └── manifest.json      # Safe App config
+│   ├── src/
+│   │   ├── App.js             # Tree UI + SDK integration
+│   │   ├── components/
+│   │   │   └── EchoTree.js    # Viz component
+│   │   └── index.js
+│   ├── config-overrides.js    # CORS/HTTPS
+│   ├── package.json
+│   └── README.md              # Sub-readme
+├── backend/                   # Move src/ here for API
+│   ├── app.py                 # Flask API stub (tree gen + calldata)
+│   └── ... (existing py files)
+└── README.md                  # Update root with integration section
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import json
+from src.echo_tree import build_echo_tree  # Adjust import
+from src.ledger import create_and_store_hash  # For calldata gen
+from web3 import Web3
+
+app = Flask(__name__)
+CORS(app)  # Enable for Safe App
+
+@app.route('/build-tree', methods=['POST'])
+def api_build_tree():
+    data = request.json  # { "family_data": json_str }
+    family_data = json.loads(data['family_data'])
+    # Temp: Use stub mode; real chain via frontend keys
+    tree, ledger = build_echo_tree_from_data(family_data)  # Wrap your func
+    return jsonify({"tree": dict(tree.nodes(data=True)), "ledger": ledger})
+
+def build_echo_tree_from_data(family_data):  # Wrapper for API
+    # Your existing logic, but return dict for JSON
+    # ...
+
+@app.route('/encode-hash-tx', methods=['POST'])
+def encode_add_hash():
+    data = request.json  # { "story_hash": "0x...", "ledger_address": "0x..." }
+    w3 = Web3()
+    ledger_abi = [...]  # Load from config
+    ledger_contract = w3.eth.contract(address=data['ledger_address'], abi=ledger_abi)
+    calldata = ledger_contract.encodeABI(fn_name='addHash', args=[data['story_hash']])
+    return jsonify({"calldata": calldata, "to": data['ledger_address']})
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+cd safe-app
+npx create-react-app . --template cra-template-safe-app  # If fresh; else manual
+npm install @safe-global/safe-apps-sdk @safe-global/safe-react-components axios  # SDK + UI Kit + API calls
+npm run start  # HTTPS dev server
+{
+  "name": "EchoWeave Legacy Weaver",
+  "description": "Weave family stories into on-chain trees—propose & sign hashes in Safe.",
+  "iconPath": "logo.svg"  # Add your 128x128 SVG to public/
+}import React from 'react';
+import ReactDOM from 'react-dom/client';
+import './index.css';
+import App from './App';
+import { SafeProvider } from '@safe-global/safe-apps-react-sdk';  // Auto-connect
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <SafeProvider loader="spinner">  {/* Loads Safe if in app */}
+    <App />
+  </SafeProvider>
+);import React, { useState, useEffect } from 'react';
+import { useSafeAppsSDK } from '@safe-global/safe-apps-react-sdk';
+import { SafeAppBar, SafeButton, SafeContainer } from '@safe-global/safe-react-components';
+import axios from 'axios';
+import EchoTree from './components/EchoTree';  // Your viz
+
+function App() {
+  const { sdk, safe } = useSafeAppsSDK();  // Auto-connect in Safe
+  const [tree, setTree] = useState(null);
+  const [familyData, setFamilyData] = useState({ root: {}, branches: {} });  // User input state
+  const [ledgerAddr, setLedgerAddr] = useState('0xYourLedger');  // From config
+
+  useEffect(() => {
+    if (safe) {
+      console.log('Connected Safe:', safe.safeAddress);
+      setLedgerAddr(safe.safeAddress);  // Or fetch from backend
+    }
+  }, [safe]);
+
+  const buildAndPropose = async () => {
+    // 1. Build tree via API
+    const res = await axios.post('http://localhost:5000/build-tree', { family_data: JSON.stringify(familyData) });
+    setTree(res.data.tree);
+
+    // 2. For each ledger entry, propose async tx
+    for (const entry of res.data.ledger) {
+      const calldataRes = await axios.post('http://localhost:5000/encode-hash-tx', {
+        story_hash: entry.hash,
+        ledger_address: ledgerAddr
+      });
+      const tx = {
+        to: calldataRes.data.to,
+        value: '0',
+        data: calldataRes.data.calldata,
+        operation: 0,  // CALL
+      };
+
+      // 3. Propose via SDK (deep link for async sig)
+      const { safeTxHash, deepLink } = await sdk.safe.createTransaction({
+        safeTransactionData: { transactions: [tx] },
+      });
+      console.log('Propose SafeTxHash:', safeTxHash);
+      // Share deepLink.url: e.g., window.open(deepLink.url) or QR
+
+      // Optional: Auto-collect (poll as before)
+      await collectAndExecute(safeTxHash);  // Your async func from ledger.py (JS port)
+    }
+  };
+
+  return (
+    <SafeContainer>
+      <SafeAppBar title="EchoWeave" />
+      <div style={{ padding: '20px' }}>
+        <h2>Weave Your Legacy</h2>
+        {/* Input form for familyData */}
+        <input placeholder="Root Story" onChange={(e) => setFamilyData({...familyData, root: {story: e.target.value}})} />
+        <SafeButton onClick={buildAndPropose}>Build & Propose to Safe</SafeButton>
+        {tree && <EchoTree data={tree} />}
+      </div>
+    </SafeContainer>
+  );
+}
+
+export default App;
+import React from 'react';
+
+const EchoTree = ({ data }) => (
+  <div>
+    {Object.entries(data).map(([node, attrs]) => (
+      <div key={node}>
+        {node} ({attrs.year}): {attrs.story?.slice(0, 50)}... [Media: {attrs.media}]
+      </div>
+    ))}
+  </div>
+);
+
+export default EchoTree;
+// Add to App.js or utils.js
+import { SafeApiKit } from '@safe-global/safe-apps-sdk';
+
+const apiKit = new SafeApiKit({ chainId: 11155111 });  // Sepolia
+
+async function collectAndExecute(safeTxHash, pollInterval = 30000, maxPolls = 20) {
+  let polls = 0;
+  while (polls < maxPolls) {
+    const tx = await apiKit.getTransaction(safeTxHash);
+    const confirmations = tx.confirmations?.length || 0;
+    const threshold = safe.threshold;  // From SDK
+    if (confirmations >= threshold) {
+      // Execute via SDK
+      await sdk.safe.execTransaction({ safeTransactionData: { safeTxHash } });
+      console.log('Executed!');
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+    polls++;
+  }
+}## Safe Wallet App Integration (v0.6)
+- **Run**: `cd safe-app && npm install && npm start`
+- **In Safe**: Add custom app URL → Build trees → Propose signs via deep links.
+- **Listing**: Submit manifest + repo to Safe team (see /safe-app/README.md).
