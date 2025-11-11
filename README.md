@@ -1210,3 +1210,122 @@ useEffect(() => {
 - **Flow**: Propose → Webhook registered → Sigs trigger SSE push → Poll stops, execute fires.
 - **Test**: Propose tx → Manual sig in Safe app → Watch QR badge update (sub-5s).
 - **Prod**: Secure SSE with auth; scale with Redis pub/sub.
+// ... (your existing contract)
+
+function batchAddHashes(bytes32[] calldata _hashes) external onlyOwner {
+    require(_hashes.length > 0, "No hashes provided");
+    for (uint i = 0; i < _hashes.length; i++) {
+        ledger.push(_hashes[i]);
+        emit HashAdded(_hashes[i], ledger.length - 1);
+    }
+}
+
+// ... (rest unchanged)
+# ... (your existing imports + from src.echo_tree import build_echo_tree  # For full tree hashes)
+
+def compute_tree_hashes(family_data):  # 👈 New: Chain all hashes from tree data
+    """Compute sequential hashes for batch (root first, then branches)."""
+    hashes = []
+    root = family_data['root']
+    root_hash = Web3.keccak(text=root['story']).hex()
+    hashes.append(root_hash)
+    
+    prev_hash = root_hash
+    for node in family_data['branches'].values():  # Assume topo order; sort by year if needed
+        node_hash = Web3.keccak(text=node['story'] + prev_hash).hex()
+        hashes.append(node_hash)
+        prev_hash = node_hash
+    
+    return hashes
+
+def create_and_store_batch(story_hashes, proposer_key=None):
+    """Propose batch add via Safe API."""
+    if CHAIN_MODE != "gnosis-safe-async":
+        return [h[:16] for h in story_hashes], "local-batch"
+
+    # Encode batch calldata
+    data = ledger_contract.encodeABI(fn_name='batchAddHashes', args=[story_hashes])
+    safe_tx = safe.build_transaction({
+        'to': ledger_contract.address,
+        'value': 0,
+        'data': data,
+        'operation': 0,
+    })
+
+    # Propose (as before)
+    safe_tx_hash = safe.get_transaction_hash(safe_tx)
+    safe_tx.sign(proposer_key)
+    propose_response = api_kit.propose_transaction(
+        safe_tx_hash=safe_tx_hash,
+        safe_tx=safe_tx,
+        sender=Account.from_key(proposer_key).address,
+        origin="EchoWeave Batch Proposer"
+    )
+    print(f"✅ Proposed batch of {len(story_hashes)} hashes | SafeTxHash: {safe_tx_hash.hex()}")
+    print(f"🔗 Sign via: https://app.safe.global/transactions/queue?safe={safe.safe_address}&safeTxHash={safe_tx_hash.hex()}")
+    
+    return story_hashes, safe_tx_hash.hex()
+
+# Update existing for single (wrap batch of 1)
+def create_and_store_hash(story, prev_hash='', proposer_key=None):
+    # For singles: Fake "batch" of chained
+    single_hashes = [Web3.keccak(text=story + prev_hash).hex()]
+    return create_and_store_batch(single_hashes, proposer_key=proposer_key)[0][0], "single-tx"
+
+# In collect_and_execute: No change—works for batch tx too
+@app.route('/build-batch-tree', methods=['POST'])  # 👈 New: For frontend
+def api_build_batch_tree():
+    data = request.json
+    family_data = json.loads(data['family_data'])
+    tree, _ = build_echo_tree_from_data(family_data)  # Your wrapper
+    hashes = compute_tree_hashes(family_data)
+    return jsonify({"tree": dict(tree.nodes(data=True)), "hashes": hashes})
+// ... (existing imports + state)
+
+const buildAndPropose = async () => {
+  // 👈 New: Single batch call
+  const res = await axios.post('http://localhost:5000/build-batch-tree', { family_data: JSON.stringify(familyData) });
+  setTree(res.data.tree);
+
+  const { hashes } = res.data;
+  const calldataRes = await axios.post('http://localhost:5000/encode-hash-tx', {  // Reuse, but pass array? Or new batch encode route
+    story_hashes: hashes,  // Backend handles batch encode
+    ledger_address: ledgerAddr
+  });
+  const tx = {
+    to: calldataRes.data.to,
+    value: '0',
+    data: calldataRes.data.calldata,  // Now batch calldata
+    operation: 0,
+  };
+
+  const { safeTxHash, deepLink } = await sdk.safe.createTransaction({
+    safeTransactionData: { transactions: [tx] },  // Single tx, batch inside
+  });
+
+  // 👈 Single QR for batch
+  setDeepLinks([{
+    story: 'Full Family Tree Batch',  // Or tree summary
+    hash: safeTxHash,
+    url: deepLink.url,
+    qrSize: 250,  // Bigger for detail
+    batchSize: hashes.length
+  }]);
+
+  // Auto-collect (as before)
+  if (autoExecute) await collectAndExecute(safeTxHash);
+};
+
+// In QR Render: Add batch info
+{deepLinks.map((link, idx) => (
+  <div key={idx}>
+    <SafeTypography>{link.story} ({link.batchSize} branches)</SafeTypography>
+    <QRCode value={link.url} size={link.qrSize} />
+    {/* Sig badge from SSE */}
+    {link.sigs && <SafeTypography>({link.sigs}/{link.threshold} signed)</SafeTypography>}
+  </div>
+))}### Batch Transactions (v0.8)
+- **Why?** One tx for the tree—save gas, one QR.
+- **Setup**: Re-deploy ledger; update API to `/build-batch-tree`.
+- **Flow**: Compute hashes → Batch calldata → Single propose → Sig on whole.
+- **Test**: 3-branch tree → 1 QR → Execute adds all 3 hashes.
