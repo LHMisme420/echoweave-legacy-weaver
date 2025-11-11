@@ -990,3 +990,117 @@ async function collectAndExecute(safeTxHash, pollInterval = 30000, maxPolls = 20
 - **Run**: `cd safe-app && npm install && npm start`
 - **In Safe**: Add custom app URL → Build trees → Propose signs via deep links.
 - **Listing**: Submit manifest + repo to Safe team (see /safe-app/README.md).
+import React, { useState, useEffect } from 'react';
+import { useSafeAppsSDK } from '@safe-global/safe-apps-react-sdk';
+import { SafeAppBar, SafeButton, SafeContainer, SafeTypography } from '@safe-global/safe-react-components';
+import QRCode from 'qrcode.react';  // 👈 New: QR lib
+import axios from 'axios';
+import EchoTree from './components/EchoTree';
+
+function App() {
+  const { sdk, safe } = useSafeAppsSDK();
+  const [tree, setTree] = useState(null);
+  const [familyData, setFamilyData] = useState({ root: {}, branches: {} });
+  const [ledgerAddr, setLedgerAddr] = useState('0xYourLedger');
+  const [deepLinks, setDeepLinks] = useState([]);  // 👈 New: Array of {hash, url, qrData} for multi-txns
+
+  useEffect(() => {
+    if (safe) {
+      console.log('Connected Safe:', safe.safeAddress);
+      setLedgerAddr(safe.safeAddress);  // Or fetch
+    }
+  }, [safe]);
+
+  const buildAndPropose = async () => {
+    const res = await axios.post('http://localhost:5000/build-tree', { family_data: JSON.stringify(familyData) });
+    setTree(res.data.tree);
+
+    const newDeepLinks = [];  // 👈 New: Collect QRs
+    for (const entry of res.data.ledger) {
+      const calldataRes = await axios.post('http://localhost:5000/encode-hash-tx', {
+        story_hash: entry.hash,
+        ledger_address: ledgerAddr
+      });
+      const tx = {
+        to: calldataRes.data.to,
+        value: '0',
+        data: calldataRes.data.calldata,
+        operation: 0,
+      };
+
+      const { safeTxHash, deepLink } = await sdk.safe.createTransaction({
+        safeTransactionData: { transactions: [tx] },
+      });
+      console.log('Propose SafeTxHash:', safeTxHash);
+
+      // 👈 New: Add to list with QR-friendly data
+      newDeepLinks.push({
+        story: entry.story || 'Untitled Branch',  // From tree attrs
+        hash: safeTxHash,
+        url: deepLink.url,  // e.g., safe://ws?params...
+        qrSize: 200  // Customizable
+      });
+    }
+    setDeepLinks(newDeepLinks);
+
+    // Optional poll (as before)
+    // await collectAndExecute(...);
+  };
+
+  return (
+    <SafeContainer>
+      <SafeAppBar title="EchoWeave" />
+      <div style={{ padding: '20px' }}>
+        <SafeTypography variant="h5">Weave Your Legacy</SafeTypography>
+        {/* Input form */}
+        <input 
+          placeholder="Root Story" 
+          onChange={(e) => setFamilyData({...familyData, root: {story: e.target.value}})} 
+          style={{ width: '100%', marginBottom: '10px' }}
+        />
+        <SafeButton onClick={buildAndPropose} style={{ marginBottom: '20px' }}>
+          Build & Propose to Safe
+        </SafeButton>
+        
+        {tree && <EchoTree data={tree} />}
+        
+        {/* 👈 New: QR Gallery */}
+        {deepLinks.length > 0 && (
+          <div>
+            <SafeTypography variant="h6" style={{ marginTop: '20px' }}>Share for Async Signatures</SafeTypography>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+              {deepLinks.map((link, idx) => (
+                <div key={idx} style={{ textAlign: 'center', border: '1px solid #ccc', padding: '10px', borderRadius: '8px' }}>
+                  <SafeTypography variant="body2">{link.story.slice(0, 30)}...</SafeTypography>
+                  <QRCode 
+                    value={link.url} 
+                    size={link.qrSize} 
+                    fgColor="#000000" 
+                    bgColor="#FFFFFF"
+                    style={{ margin: '10px auto' }}
+                  />
+                  <SafeTypography variant="caption" style={{ wordBreak: 'break-all' }}>
+                    {link.hash.slice(0, 10)}...
+                  </SafeTypography>
+                  <SafeButton 
+                    variant="outlined" 
+                    size="small" 
+                    onClick={() => navigator.clipboard.writeText(link.url)}  // Copy fallback
+                    style={{ marginTop: '5px' }}
+                  >
+                    Copy Link
+                  </SafeButton>
+                </div>
+              ))}
+            </div>
+            <SafeTypography variant="body2" style={{ marginTop: '10px', fontStyle: 'italic' }}>
+              Scan in Safe Wallet app to sign. Threshold met? Poll executes automatically.
+            </SafeTypography>
+          </div>
+        )}
+      </div>
+    </SafeContainer>
+  );
+}
+
+export default App;
