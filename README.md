@@ -234,3 +234,289 @@ if __name__ == "__main__":
         print("⚠️  No private key—using local stub. Set --private-key or ECHO_PRIVATE_KEY for on-chain.")
     
     tree, ledger = build_echo_tree(args.input, private_key=args.private_key)
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+contract HashLedger {
+    bytes32[] public ledger;
+    address public owner;
+
+    event HashAdded(bytes32 indexed hash, uint256 index);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    constructor(address _owner) {
+        owner = _owner;
+        ledger.push(keccak256(abi.encodePacked("EchoWeave Root: Genesis Block")));
+    }
+
+    function addHash(bytes32 _hash) external onlyOwner {
+        ledger.push(_hash);
+        emit HashAdded(_hash, ledger.length - 1);
+    }
+
+    function getHash(uint256 _index) external view returns (bytes32) {
+        return ledger[_index];
+    }
+
+    function getLedgerLength() external view returns (uint256) {
+        return ledger.length;
+    }
+}// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+contract MultiSigWallet {
+    event Deposit(address indexed sender, uint amount, uint balance);
+    event SubmitTransaction(
+        address indexed owner,
+        uint indexed txIndex,
+        address indexed to,
+        uint value,
+        bytes data
+    );
+    event ConfirmTransaction(address indexed owner, uint indexed txIndex);
+    event RevokeConfirmation(address indexed owner, uint indexed txIndex);
+    event ExecuteTransaction(address indexed owner, uint indexed txIndex);
+
+    address[] public owners;
+    mapping(address => bool) public isOwner;
+    uint public numConfirmationsRequired;
+
+    struct Transaction {
+        address to;
+        uint value;
+        bytes data;
+        bool executed;
+        uint numConfirmations;
+    }
+
+    // mapping from tx index => owner => bool
+    mapping(uint => mapping(address => bool)) public isConfirmed;
+
+    Transaction[] public transactions;
+
+    modifier onlyOwner() {
+        require(isOwner[msg.sender], "not owner");
+        _;
+    }
+
+    modifier txExists(uint _txIndex) {
+        require(_txIndex < transactions.length, "tx does not exist");
+        _;
+    }
+
+    modifier notExecuted(uint _txIndex) {
+        require(!transactions[_txIndex].executed, "tx already executed");
+        _;
+    }
+
+    modifier notConfirmed(uint _txIndex) {
+        require(!isConfirmed[_txIndex][msg.sender], "tx already confirmed");
+        _;
+    }
+
+    constructor(address[] memory _owners, uint _numConfirmationsRequired) {
+        require(_owners.length > 0, "owners required");
+        require(
+            _numConfirmationsRequired > 0 &&
+                _numConfirmationsRequired <= _owners.length,
+            "invalid number of required confirmations"
+        );
+
+        for (uint i = 0; i < _owners.length; i++) {
+            address owner = _owners[i];
+            require(owner != address(0), "invalid owner");
+            require(!isOwner[owner], "owner not unique");
+            isOwner[owner] = true;
+            owners.push(owner);
+        }
+        numConfirmationsRequired = _numConfirmationsRequired;
+    }
+
+    receive() external payable {
+        emit Deposit(msg.sender, msg.value, address(this).balance);
+    }
+
+    function submitTransaction(
+        address _to,
+        uint _value,
+        bytes memory _data
+    ) public onlyOwner {
+        uint txIndex = transactions.length;
+        transactions.push(
+            Transaction({
+                to: _to,
+                value: _value,
+                data: _data,
+                executed: false,
+                numConfirmations: 0
+            })
+        );
+        emit SubmitTransaction(msg.sender, txIndex, _to, _value, _data);
+    }
+
+    function confirmTransaction(uint _txIndex)
+        public
+        onlyOwner
+        txExists(_txIndex)
+        notExecuted(_txIndex)
+        notConfirmed(_txIndex)
+    {
+        Transaction storage transaction = transactions[_txIndex];
+        transaction.numConfirmations += 1;
+        isConfirmed[_txIndex][msg.sender] = true;
+        emit ConfirmTransaction(msg.sender, _txIndex);
+    }
+
+    function executeTransaction(uint _txIndex)
+        public
+        onlyOwner
+        txExists(_txIndex)
+        notExecuted(_txIndex)
+    {
+        Transaction storage transaction = transactions[_txIndex];
+        require(
+            transaction.numConfirmations >= numConfirmationsRequired,
+            "cannot execute tx"
+        );
+        transaction.executed = true;
+        (bool success, ) = transaction.to.call{value: transaction.value}(
+            transaction.data
+        );
+        require(success, "tx failed");
+        emit ExecuteTransaction(msg.sender, _txIndex);
+    }
+
+    function revokeConfirmation(uint _txIndex)
+        public
+        onlyOwner
+        txExists(_txIndex)
+        notExecuted(_txIndex)
+    {
+        Transaction storage transaction = transactions[_txIndex];
+        require(isConfirmed[_txIndex][msg.sender], "tx not confirmed");
+        transaction.numConfirmations -= 1;
+        isConfirmed[_txIndex][msg.sender] = false;
+        emit RevokeConfirmation(msg.sender, _txIndex);
+    }
+
+    function getOwners() public view returns (address[] memory) {
+        return owners;
+    }
+
+    function getTransactionCount() public view returns (uint) {
+        return transactions.length;
+    }
+
+    function getTransaction(uint _txIndex)
+        public
+        view
+        returns (
+            address to,
+            uint value,
+            bytes memory data,
+            bool executed,
+            uint numConfirmations
+        )
+    {
+        Transaction storage transaction = transactions[_txIndex];
+        return (
+            transaction.to,
+            transaction.value,
+            transaction.data,
+            transaction.executed,
+            transaction.numConfirmations
+        );
+    }
+}import hashlib
+import json
+import os
+from web3 import Web3
+
+# Load config
+try:
+    with open("../config/multi_sig_config.json", "r") as f:
+        config = json.load(f)
+    w3 = Web3(Web3.HTTPProvider("https://sepolia.infura.io/v3/YOUR_INFURA_KEY"))
+    multi_contract = w3.eth.contract(address=config["multi_sig"]["address"], abi=config["multi_sig"]["abi"])
+    ledger_contract = w3.eth.contract(address=config["hash_ledger"]["address"], abi=config["hash_ledger"]["abi"])
+    CHAIN_MODE = "multi-sig"
+except:
+    print("⚠️ Using local stub—run deploy first!")
+    CHAIN_MODE = "stub"
+
+def create_and_store_hash(story, prev_hash='', private_key=None):
+    full_input = story + prev_hash
+    story_hash = Web3.keccak(text=full_input).hex()
+
+    if CHAIN_MODE == "multi-sig" and private_key:
+        # Encode call data for ledger.addHash
+        data = ledger_contract.encodeABI(fn_name='addHash', args=[story_hash])
+        # Submit via multi-sig (from sender)
+        nonce = w3.eth.get_transaction_count(w3.eth.account.from_key(private_key).address)
+        tx = multi_contract.functions.submitTransaction(
+            ledger_contract.address, 0, data
+        ).build_transaction({
+            "from": w3.eth.account.from_key(private_key).address,
+            "gas": 200000,
+            "gasPrice": w3.eth.gas_price,
+            "nonce": nonce,
+        })
+        signed = w3.eth.account.sign_transaction(tx, private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        tx_index = multi_contract.functions.getTransactionCount().call() - 1  # Latest tx
+        print(f"✅ Submitted hash {story_hash[:16]}... as tx {tx_index} | Tx: {tx_hash.hex()}")
+        print(f"ℹ️ Next: Confirm from {config['multi_sig']['abi'][0]['threshold'] - 1} other owners, then execute.")
+        return story_hash, tx_index  # Return index for later confirm/execute
+    else:
+        return story_hash[:16], "local-fallback"
+from web3 import Web3
+import json
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--tx-index', type=int, required=True, help='Tx index to confirm')
+parser.add_argument('--private-key', type=str, required=True, help='Owner private key')
+args = parser.parse_args()
+
+with open("../config/multi_sig_config.json", "r") as f:
+    config = json.load(f)
+w3 = Web3(Web3.HTTPProvider("https://sepolia.infura.io/v3/YOUR_INFURA_KEY"))
+multi = w3.eth.contract(address=config["multi_sig"]["address"], abi=config["multi_sig"]["abi"])
+
+account = w3.eth.account.from_key(args.private_key)
+tx = multi.functions.confirmTransaction(args.tx_index).build_transaction({
+    "from": account.address,
+    "gas": 200000,
+    "gasPrice": w3.eth.gas_price,
+    "nonce": w3.eth.get_transaction_count(account.address),
+})
+signed = w3.eth.account.sign_transaction(tx, args.private_key)
+tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+print(f"Confirmed tx {args.tx_index} | Tx: {tx_hash.hex()}")
+print(f"Confirmations now: {multi.functions.getTransaction(args.tx_index).call()[-1]}")  # numConfirmations
+# Same imports/args as confirm, but --tx-index and --private-key
+# ...
+
+tx = multi.functions.executeTransaction(args.tx_index).build_transaction({
+    "from": account.address,
+    "gas": 300000,
+    "gasPrice": w3.eth.gas_price,
+    "nonce": w3.eth.get_transaction_count(account.address),
+})
+# ... sign, send, receipt
+print(f"Executed tx {args.tx_index} | Tx: {tx_hash.hex()}")
+print("Hash added to ledger!")
+### Multi-Sig Support (v0.3)
+- **Why?** Family co-ownership: Propose story adds, require 2+ confirms to execute.
+- **Setup**:
+  1. Edit owners/threshold in deploy script.
+  2. `python scripts/deploy_multi_sig.py --owners 0x... 0x... --threshold 2`
+  3. Run tree: Submits proposals. Use `confirm_tx.py` & `execute_tx.py` for the rest.
+- **Flow**: Submit (auto) → Confirm (manual, other keys) → Execute → Hash on-chain.
+- **Test**: Use Ganache with multiple accounts; query ledger on Etherscan.
