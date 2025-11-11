@@ -1104,3 +1104,109 @@ function App() {
 }
 
 export default App;
+import hmac
+import hashlib
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+# ... (your existing imports)
+
+# ... (existing app setup)
+
+# In-memory SSE clients (prod: Use Redis)
+sse_clients = []
+
+@app.route('/webhook/safe', methods=['POST'])
+def safe_webhook():
+    # Verify signature (Safe's HMAC with your API secret)
+    api_secret = os.getenv('SAFE_API_SECRET')  # Set in env; from Safe dashboard
+    if not api_secret:
+        return jsonify({'error': 'Missing API secret'}), 500
+    
+    signature = request.headers.get('X-Safe-Signature')
+    payload = request.get_data()
+    expected_sig = hmac.new(
+        api_secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    
+    if not hmac.compare_digest(signature, expected_sig):
+        return jsonify({'error': 'Invalid signature'}), 403
+    
+    event = request.json  # { "safeTxHash": "0x...", "type": "SIGNED", "confirmations": [...] }
+    safe_tx_hash = event['safeTxHash']
+    event_type = event['type']
+    
+    # Process: e.g., If EXECUTED, clean up; else notify SSE
+    if event_type == 'SIGNED':
+        confirmations = len(event.get('confirmations', []))
+        threshold = 2  # Fetch from config or query Safe
+        broadcast_sse(safe_tx_hash, {'type': 'update', 'sigs': confirmations, 'threshold': threshold})
+        
+        if confirmations >= threshold:
+            # Auto-trigger execute (via ledger.py helper)
+            from src.ledger import collect_and_execute  # Adjust import
+            collect_and_execute(safe_tx_hash, executor_key=os.getenv('ECHO_EXECUTOR_KEY'))
+    
+    return jsonify({'status': 'received'}), 200
+
+def broadcast_sse(safe_tx_hash, data):
+    """Push to all SSE clients."""
+    message = json.dumps({'txHash': safe_tx_hash, **data})
+    for client in sse_clients[:]:  # Copy to avoid mod during iter
+        try:
+            client
+// ... (your existing imports + useState for deepLinks)
+
+const [sseSource, setSseSource] = useState(null);  // 👈 New: SSE connection
+
+useEffect(() => {
+  if (safe) {
+    // ... existing
+  }
+
+  // 👈 New: Connect SSE on mount (or after propose)
+  const eventSource = new EventSource('http://localhost:5000/sse/updates');  // Prod: Your domain
+  eventSource.onmessage = (event) => {
+    const update = JSON.parse(event.data);
+    if (update.type === 'heartbeat') return;
+    
+    setDeepLinks(prev => prev.map(link => 
+      link.hash === update.txHash 
+        ? { ...link, sigs: update.sigs, threshold: update.threshold }  // Update counts
+        : link
+    ));
+    
+    if (update.executed) {
+      alert(`Tx ${update.txHash.slice(0,10)}... executed! Legacy woven.`);
+    }
+  };
+  
+  eventSource.onerror = () => console.log('SSE reconnecting...');
+  setSseSource(eventSource);
+
+  return () => {
+    eventSource.close();
+    setSseSource(null);
+  };
+}, [safe]);  // Reconnect if Safe changes
+
+// In buildAndPropose: After setDeepLinks, register webhook per tx (optional API call to backend)
+
+// Updated QR Render (in JSX):
+{deepLinks.map((link, idx) => (
+  <div key={idx} style={{ ... }}>  // Existing
+    <SafeTypography variant="body2">
+      {link.story.slice(0, 30)}... {link.sigs ? `(${link.sigs}/${link.threshold} signed)` : ''}
+    </SafeTypography>
+    {/* QR + copy */}
+  </div>
+))}### Webhook Polling (v0.7)
+- **Why?** Real-time: Safe pings on sigs → Instant UI updates, auto-execute.
+- **Setup**:
+  1. Gen Safe webhook secret → Env: `SAFE_API_SECRET=...`.
+  2. Backend: Run Flask → Register webhook URL in Safe dashboard (Events: SIGNED,EXECUTED).
+  3. Frontend: SSE auto-connects → QRs show live sig badges.
+- **Flow**: Propose → Webhook registered → Sigs trigger SSE push → Poll stops, execute fires.
+- **Test**: Propose tx → Manual sig in Safe app → Watch QR badge update (sub-5s).
+- **Prod**: Secure SSE with auth; scale with Redis pub/sub.
