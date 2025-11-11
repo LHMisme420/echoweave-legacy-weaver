@@ -696,3 +696,128 @@ parser.add_argument('--owner-keys', nargs='+', help='List of owner private keys 
   3. Run tree: `python src/echo_tree.py --owner-keys 0xKey1 0xKey2`
 - **Flow**: SDK builds/signs/executes addHash calls. View on Etherscan/Safe UI.
 - **Prod Tips**: Use Safe Transaction Service for relaying; add modules for auto-approvals.
+# Existing...
+requests  # For API polling if needed (SDK handles most)
+{
+  "safe": { "address": "...", "abi": [...] },
+  "hash_ledger": { "address": "...", "abi": [...] },
+  "api_key": "YOUR_SAFE_API_KEY_HERE",  # Add after signup
+  "chain_id": 11155111  # Sepolia
+}import json
+import time
+import os
+from web3 import Web3
+from eth_account import Account
+from safe_eth_py import Safe, SafeApiKit  # From requirements
+
+# Load config
+try:
+    with open("../config/gnosis_safe_config.json", "r") as f:
+        config = json.load(f)
+    w3 = Web3(Web3.HTTPProvider("https://sepolia.infura.io/v3/YOUR_INFURA_KEY"))
+    ethereum_client = w3  # SDK uses web3
+    safe = Safe(config["safe"]["address"], ethereum_client, chain_id=config["chain_id"])
+    api_kit = SafeApiKit(safe.safe_address, config["chain_id"], config["api_key"])
+    ledger_contract = w3.eth.contract(
+        address=config["hash_ledger"]["address"],
+        abi=config["hash_ledger"]["abi"]
+    )
+    CHAIN_MODE = "gnosis-safe-async"
+except:
+    print("⚠️ Using local stub—run deploy & add API key!")
+    CHAIN_MODE = "stub"
+
+def create_and_store_hash(story, prev_hash='', proposer_key=None):
+    full_input = story + prev_hash
+    story_hash = Web3.keccak(text=full_input).hex()
+
+    if CHAIN_MODE == "gnosis-safe-async" and proposer_key:
+        # Build multisig tx: addHash(story_hash)
+        data = ledger_contract.encodeABI(fn_name='addHash', args=[story_hash])
+        safe_tx = safe.build_transaction({
+            'to': ledger_contract.address,
+            'value': 0,
+            'data': data,
+            'operation': 0,  # CALL
+        })
+
+        # Sign with proposer (off-chain)
+        safe_tx_hash = safe.get_transaction_hash(safe_tx)
+        safe_tx.sign(proposer_key)
+
+        # Propose to Safe API (collects first sig)
+        propose_response = api_kit.propose_transaction(
+            safe_tx_hash=safe_tx_hash,
+            safe_tx=safe_tx,
+            sender=Account.from_key(proposer_key).address,
+            origin="EchoWeave Proposer"  # Optional metadata
+        )
+        print(f"✅ Proposed hash {story_hash[:16]}... | SafeTxHash: {safe_tx_hash.hex()}")
+        print(f"ℹ️ Share this hash for async sigs: {safe_tx_hash.hex()}")
+        print(f"🔗 Owners sign via: https://app.safe.global/transactions/queue?safe={safe.safe_address}&safeTxHash={safe_tx_hash.hex()}")
+        return story_hash, safe_tx_hash.hex()  # TxHash for polling
+    else:
+        return story_hash[:16], "local-fallback"
+
+def collect_and_execute(safe_tx_hash, executor_key=None, poll_interval=30, max_polls=20):
+    """Poll for sigs, execute when threshold met."""
+    if CHAIN_MODE != "gnosis-safe-async":
+        print("❌ Async mode not active—skipping.")
+        return "stub-executed"
+
+    tx_details = api_kit.get_transaction(safe_tx_hash)
+    current_confirmations = len(tx_details.confirmations) if tx_details.confirmations else 0
+    threshold = safe.retrieve_all_info().threshold
+    print(f"Current sigs: {current_confirmations}/{threshold}")
+
+    polls = 0
+    while current_confirmations < threshold and polls < max_polls:
+        print(f"⏳ Polling... ({polls+1}/{max_polls})")
+        time.sleep(poll_interval)
+        polls += 1
+        tx_details = api_kit.get_transaction(safe_tx_hash)
+        current_confirmations = len(tx_details.confirmations) if tx_details.confirmations else 0
+        print(f"Updated sigs: {current_confirmations}/{threshold}")
+
+    if current_confirmations >= threshold:
+        # Execute with executor (any owner)
+        safe_tx = safe.build_transaction_from_hash(safe_tx_hash)  # Rebuild from hash
+        safe_tx.sign(executor_key)  # Final sig if needed (SDK handles)
+        tx_response = safe.execute_transaction(safe_tx, executor_key)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_response.transaction_hash)
+        print(f"✅ Executed! Tx: {receipt.transactionHash.hex()}")
+        return receipt.transactionHash.hex()
+    else:
+        print(f"⏰ Threshold not met after {max_polls} polls. Manual check needed.")
+        return None
+import argparse
+from src.ledger import api_kit, safe  # Import from project
+
+parser = argparse.ArgumentParser(description="Sign a pending EchoWeave tx async.")
+parser.add_argument('--safe-tx-hash', required=True, help='Shared SafeTxHash from proposer')
+parser.add_argument('--private-key', required=True, help='Your owner private key')
+args = parser.parse_args()
+
+# Sign & confirm
+safe_tx = safe.build_transaction_from_hash(args.safe_tx_hash)
+safe_tx.sign(args.private_key)
+api_kit.confirm_transaction(args.safe_tx_hash, safe_tx.signatures[0])  # Submit sig
+print(f"✅ Signed & confirmed: {args.safe_tx_hash}")
+print(f"Check status: https://app.safe.global/transactions/queue?safe={safe.safe_address}&safeTxHash={args.safe_tx_hash}")
+parser.add_argument('--auto-execute', action='store_true', help='Poll & execute after propose')
+parser.add_argument('--proposer-key', type=str, default=os.getenv('ECHO_PROPOSER_KEY'))
+parser.add_argument('--executor-key', type=str, default=os.getenv('ECHO_EXECUTOR_KEY'))
+# ...
+if args.auto_execute:
+    for entry in ledger:
+        collect_and_execute(entry['tx_hash'], executor_key=args.executor_key)
+### Async Signature Collection (v0.5)
+- **Why?** Owners sign anytime/anywhere—no live sync.
+- **Setup**:
+  1. Get Safe API key: [safe.global/api-keys](https://safe.global/api-keys) → Add to config.
+  2. Propose: Run tree with `--proposer-key` → Share SafeTxHash link.
+  3. Sign: Others run `async_sign.py --safe-tx-hash <hash> --private-key <key>`.
+  4. Collect: Use `--auto-execute` to poll (or manual via Safe app).
+- **Flow**: Propose (1 sig) → Share hash → Async signs → Poll → Execute.
+- **Demo**: Proposes 3 txns (root + branches), waits ~5 mins for sigs, executes all.
+- **Prod**: Integrate webhooks for real-time (Safe API supports).
