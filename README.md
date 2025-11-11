@@ -184,3 +184,53 @@ if __name__ == "__main__":
 - **Wilder?**: Tie in Unplug Odyssey—e.g., export trees as "Echo Drops" for IRL journals.
 
 What's the move? Commit that README tweak, share a run output, or "add [feature]"? We're just getting woven. 🚀
+# ... (your existing imports and build_echo_tree function stay the same)
+
+import os
+from ledger import create_and_store_hash  # Updated for chain
+
+def build_echo_tree(data_file, private_key=None):
+    G = nx.DiGraph()
+    with open(data_file, 'r') as f:
+        family_data = json.load(f)
+
+    # Root node with ledger init
+    root = family_data['root']
+    G.add_node('root', **root)
+    root_hash, root_tx = create_and_store_hash(root['story'], private_key=private_key)
+    ledger = [{'hash': root_hash, 'tx': root_tx}]  # Track tx for viz
+
+    # Branch out with chained hashes
+    for node_id, node in family_data['branches'].items():
+        G.add_node(node_id, **node)
+        parent = node.get('parent', 'root')
+        G.add_edge(parent, node_id)
+        prev_hash = ledger[-1]['hash']
+        node_hash, node_tx = create_and_store_hash(node['story'], prev_hash, private_key=private_key)
+        ledger.append({'hash': node_hash, 'tx': node_tx})
+
+    # Viz: Enhanced text tree with tx links
+    print("Echo Tree Structure:")
+    for node in nx.topological_sort(G):
+        attrs = G.nodes[node]
+        story_snip = attrs['story'][:50] + "..."
+        print(f"{node} ({attrs['year']}): {story_snip} [Media: {attrs.get('media', 'N/A')}]")
+
+    print("\nSecure On-Chain Ledger:")
+    for i, entry in enumerate(ledger):
+        print(f"Entry {i}: Hash {entry['hash'][:16]}... | Tx: {entry['tx'][:10]}...")
+
+    return G, ledger
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Weave your Echo Tree on-chain.")
+    parser.add_argument('--input', default='examples/sample_family.json', help='JSON family data')
+    parser.add_argument('--private-key', type=str, default=os.getenv('ECHO_PRIVATE_KEY'), 
+                        help='Ethereum private key (or set ECHO_PRIVATE_KEY env var for security)')
+    args = parser.parse_args()
+    
+    # Secure fallback: Warn if key missing but chain mode active
+    if args.private_key is None:
+        print("⚠️  No private key—using local stub. Set --private-key or ECHO_PRIVATE_KEY for on-chain.")
+    
+    tree, ledger = build_echo_tree(args.input, private_key=args.private_key)
