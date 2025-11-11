@@ -22,7 +22,7 @@ Turn family whispers into unbreakable timelines: AI branches stories from photos
 - Potential: Viral for boomers (2B+ by 2030), monetize via NFT "echo shards."
 
 ## Quick Start
-1. Clone: `git clone https://github.com/[yourusername]/echoweave-legacy-weaver.git`
+1. Clone: `git clone https://github.com/[LHMisme420]/echoweave-legacy-weaver.git`
 2. Install: `pip install -r requirements.txt`
 3. Run: `python src/echo_tree.py --input examples/sample_family.json`
 Output: Your interactive tree + ledger.
